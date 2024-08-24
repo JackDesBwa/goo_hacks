@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import struct
 from PIL import Image
 from collections import namedtuple
@@ -154,76 +156,120 @@ class GooLayerInfo:
         )
 
 
-def rgb565_to_pil(size, data):
-    sz = size[0] * size[1]
-    rgb = [0] * (3 * sz)
-    for i, v in enumerate(struct.unpack('>'+str(sz)+'H', data)):
-        rgb[3*i+0] = (v & 0xF800) >> 8
-        rgb[3*i+1] = (v & 0x07E0) >> 3
-        rgb[3*i+2] = (v & 0x001F) << 3
-    return Image.frombuffer('RGB', size, bytearray(rgb))
+class GooReader:
+    @staticmethod
+    def rgb565_to_pil(size, data):
+        sz = size[0] * size[1]
+        rgb = [0] * (3 * sz)
+        for i, v in enumerate(struct.unpack('>'+str(sz)+'H', data)):
+            rgb[3*i+0] = (v & 0xF800) >> 8
+            rgb[3*i+1] = (v & 0x07E0) >> 3
+            rgb[3*i+2] = (v & 0x001F) << 3
+        return Image.frombuffer('RGB', size, bytearray(rgb))
 
+    @staticmethod
+    def rle_to_pil(size, data):
+        img_buffer = [0] * (size[0] * size[1])
+        h = 1  # Initial charater U ignored in input data
+        i = 0  # Set at beginning of image buffer
+        value = 0
 
-def rle_to_pil(size, data):
-    img_buffer = [0] * (size[0] * size[1])
-    h = 1  # Initial charater U ignored in input data
-    i = 0  # Set at beginning of image buffer
-    value = 0
+        h_end = len(data) - 1  # Final 1-byte checksum ignored
+        while h < h_end:
+            chunk_type = (data[h] >> 6) & 0x3
+            chunk_len_type = (data[h] >> 4) & 0x3
+            chunk_len = 0
+            dh = 0
 
-    h_end = len(data) - 1  # Final 1-byte checksum ignored
-    while h < h_end:
-        chunk_type = (data[h] >> 6) & 0x3
-        chunk_len_type = (data[h] >> 4) & 0x3
-        chunk_len = 0
-        dh = 0
-
-        if chunk_type == 0:
-            value = 0
-        elif chunk_type == 1:
-            value = data[h+1]
-            dh = 1
-        elif chunk_type == 2:
-            dv = data[h] & 0x0f
-            if chunk_len_type & 1:
-                chunk_len = data[h+1]
+            if chunk_type == 0:
+                value = 0
+            elif chunk_type == 1:
+                value = data[h+1]
                 dh = 1
+            elif chunk_type == 2:
+                dv = data[h] & 0x0f
+                if chunk_len_type & 1:
+                    chunk_len = data[h+1]
+                    dh = 1
+                else:
+                    chunk_len = 1
+                if chunk_len_type & 2:
+                    value += dv
+                    print('rle_parser: unsure +dv')
+                else:
+                    value -= dv
+                    print('rle_parser: unsure -dv')
             else:
-                chunk_len = 1
-            if chunk_len_type & 2:
-                value += dv
-                print('rle_parser: unsure +dv')
-            else:
-                value -= dv
-                print('rle_parser: unsure -dv')
-        else:
-            value = 0xff
+                value = 0xff
 
-        if chunk_len == 0:
-            if chunk_len_type == 0:
-                chunk_len = (data[h] & 0x0f)
-            elif chunk_len_type == 1:
-                chunk_len = (data[h] & 0x0f) + \
-                            (data[h+dh+1] << 4)
-                dh += 1
-            elif chunk_len_type == 2:
-                chunk_len = (data[h] & 0x0f) + \
-                            (data[h+dh+2] << 4) + \
-                            (data[h+dh+1] << (4+8))
-                dh += 2
-            else:
-                chunk_len = (data[h] & 0x0f) + \
-                            (data[h+dh+3] << 4) + \
-                            (data[h+dh+2] << (4+8)) + \
-                            (data[h+dh+1] << (4+16))
-                dh += 3
+            if chunk_len == 0:
+                if chunk_len_type == 0:
+                    chunk_len = (data[h] & 0x0f)
+                elif chunk_len_type == 1:
+                    chunk_len = (data[h] & 0x0f) + \
+                                (data[h+dh+1] << 4)
+                    dh += 1
+                elif chunk_len_type == 2:
+                    chunk_len = (data[h] & 0x0f) + \
+                                (data[h+dh+2] << 4) + \
+                                (data[h+dh+1] << (4+8))
+                    dh += 2
+                else:
+                    chunk_len = (data[h] & 0x0f) + \
+                                (data[h+dh+3] << 4) + \
+                                (data[h+dh+2] << (4+8)) + \
+                                (data[h+dh+1] << (4+16))
+                    dh += 3
 
-        if value != 0:  # Image initialized at 0, no modification if value is 0
-            img_buffer[i:i+chunk_len] = [value] * chunk_len
-        i += chunk_len
+            if value != 0:  # Image already initialized at 0
+                img_buffer[i:i+chunk_len] = [value] * chunk_len
+            i += chunk_len
 
-        h += dh + 1
+            h += dh + 1
 
-    return Image.frombuffer('L', size, bytearray(img_buffer))
+        return Image.frombuffer('L', size, bytearray(img_buffer))
+
+    def __init__(self, f):
+        self.f = f
+        self.f.seek(0)
+        self.header_info = GooHeaderInfo.parse(
+            self.f.read(GooHeaderInfo.size())
+        )
+        self.go_first_layer()
+
+    def decode_preview_small(self):
+        return GooReader.rgb565_to_pil(
+            (116, 116),
+            self.header_info.preview_image_small
+        )
+
+    def decode_preview_big(self):
+        return GooReader.rgb565_to_pil(
+            (290, 290),
+            self.header_info.preview_image_big
+        )
+
+    def go_first_layer(self):
+        self.layer_offset = self.header_info.offset_layer_content
+        self.f.seek(self.layer_offset)
+        self.layer_info = GooLayerInfo.parse(self.f.read(GooLayerInfo.size()))
+        self.layer_nb = 1
+
+    def go_next_layer(self):
+        if self.layer_nb >= self.header_info.total_layers:
+            return False
+        self.layer_offset += GooLayerInfo.size() + self.layer_info.data_size + 2
+        self.f.seek(self.layer_offset)
+        self.layer_info = GooLayerInfo.parse(self.f.read(GooLayerInfo.size()))
+        self.layer_nb += 1
+        return True
+
+    def decode_layer_image(self):
+        self.f.seek(self.layer_offset + GooLayerInfo.size())
+        return GooReader.rle_to_pil(
+            (self.header_info.x_resolution, self.header_info.y_resolution),
+            self.f.read(self.layer_info.data_size)
+        )
 
 
 if __name__ == "__main__":
@@ -267,22 +313,20 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.filename, 'rb') as f:
-        header_info = GooHeaderInfo.parse(f.read(GooHeaderInfo.size()))
+        goo = GooReader(f)
         if args.header_info or args.header_parameter:
             print('==== HEADER ====')
-            print_fields(GooHeaderInfo, header_info, args.header_parameter)
+            print_fields(GooHeaderInfo, goo.header_info, args.header_parameter)
 
         if args.preview_small:
-            img = rgb565_to_pil((116, 116), header_info.preview_image_small)
+            img = goo.decode_preview_small()
             img.save(args.preview_small)
 
         if args.preview_big:
-            img = rgb565_to_pil((290, 290), header_info.preview_image_big)
+            img = goo.decode_preview_big()
             img.save(args.preview_big)
 
         if args.layers or args.layer_info or args.layer_parameter or args.layer_image_prefix:
-            layer_offset = header_info.offset_layer_content
-            layer_nb = 0
             layers = tuple(tuple(map(int, y.split('-'))) for y in args.layers.split(',')) if args.layers else tuple()
 
             def is_layer_enabled(layer):
@@ -297,21 +341,21 @@ if __name__ == "__main__":
                             return True
                 return False
 
-            while layer_nb < header_info.total_layers:
-                f.seek(layer_offset)
-                layer_nb += 1
-                layer_info = GooLayerInfo.parse(f.read(GooLayerInfo.size()))
-                if is_layer_enabled(layer_nb):
-                    p = f'L{layer_nb:<5} |' if args.layer_parameter else ''
-                    if not args.layer_parameter:
-                        print(f'==== LAYER {layer_nb} ====')
-                    if args.layer_info or args.layer_parameter:
-                        print_fields(GooLayerInfo, layer_info, args.layer_parameter, prefix=p)
+            def layer_process(layer_nb):
+                if not is_layer_enabled(layer_nb):
+                    return
 
-                    if args.layer_image_prefix:
-                        print('Export image')
-                        f.seek(layer_offset + GooLayerInfo.size())
-                        img = rle_to_pil((header_info.x_resolution, header_info.y_resolution), f.read(layer_info.data_size))
-                        img.save(f'{args.layer_image_prefix}{layer_nb:05}.png')
+                p = f'L{layer_nb:<5} |' if args.layer_parameter else ''
+                if not args.layer_parameter:
+                    print(f'==== LAYER {layer_nb} ====')
+                if args.layer_info or args.layer_parameter:
+                    print_fields(GooLayerInfo, goo.layer_info, args.layer_parameter, prefix=p)
 
-                layer_offset += GooLayerInfo.size() + layer_info.data_size + 2
+                if args.layer_image_prefix:
+                    print('Export image')
+                    img = goo.decode_layer_image()
+                    img.save(f'{args.layer_image_prefix}{layer_nb:05}.png')
+
+            layer_process(goo.layer_nb)
+            while goo.go_next_layer():
+                layer_process(goo.layer_nb)
