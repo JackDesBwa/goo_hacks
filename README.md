@@ -1,3 +1,5 @@
+This is an abandonned project, because I found a better tool at https://github.com/sn4k3/UVtools
+
 GOO Hack scripts
 ================
 
